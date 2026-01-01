@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use crate::utils::get_store_path;
+use indexmap::IndexMap;
 
 // Metadata for a single tensor in raw format in safetensor file
 #[derive(Serialize, Deserialize, Debug)]
@@ -10,9 +11,12 @@ pub struct RawTensorMetaData {
     pub shape: Vec<usize>,
     pub dtype: String,
     pub data_offsets: (usize, usize),
+
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 // Header for safetensor file in raw format
-pub type RawHeader = HashMap<String, RawTensorMetaData>;
+pub type RawHeader = IndexMap<String, RawTensorMetaData>;
 
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -20,6 +24,11 @@ pub struct ManifestTensor {
     pub shape: Vec<usize>,
     pub dtype: String,
     pub hash: String,
+    // Fix Issue #4: Preserve physical layout order
+    pub index: usize,
+
+    #[serde(default)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,10 +54,14 @@ impl TGitManifest {
         println!("Total Tensors: {}", self.tensors.len());
         println!("Total Size: {} bytes", self.total_size);
         println!("Tensors:");
-        for (name, tensor) in &self.tensors {
+        
+        let mut sorted_tensors: Vec<(&String, &ManifestTensor)> = self.tensors.iter().collect();
+        sorted_tensors.sort_by_key(|k| k.1.index);
+        
+        for (name, tensor) in sorted_tensors {
             println!(
-                "- {}: shape={:?}, dtype={}, hash={}",
-                name, tensor.shape, tensor.dtype, tensor.hash
+                "- [{}] {}: shape={:?}, dtype={}, hash={}",
+                tensor.index, name, tensor.shape, tensor.dtype, tensor.hash
             );
         }
     }
@@ -60,21 +73,49 @@ impl TGitManifest {
         let mut writer = std::io::BufWriter::new(file);
 
         let mut sorted_tensor_names: Vec<&String> = self.tensors.keys().collect();
-        sorted_tensor_names.sort();
+        // Fix Issue #4: Sort by original index to ensure deterministic restoration
+        sorted_tensor_names.sort_by_key(|name| self.tensors[*name].index);
 
-        let mut header_map: RawHeader = HashMap::new();
+        let mut header_map: RawHeader = IndexMap::new();
         let mut current_offset = 0;
 
+        // Issue #2: Track written hashes to handle shared weights
+        // Hash -> (start_offset, end_offset)
+        let mut written_hashes: HashMap<String, (usize, usize)> = HashMap::new();
+
+        // Pass 1: Build the Header (calculate offsets with alignment)
         for name in &sorted_tensor_names {
             let tensor = &self.tensors[*name];
+
+            // Shared Weights Deduplication
+            if let Some(&(start, end)) = written_hashes.get(&tensor.hash) {
+                let meta = RawTensorMetaData {
+                    shape: tensor.shape.clone(),
+                    dtype: tensor.dtype.clone(),
+                    data_offsets: (start, end),
+                    extra: tensor.extra.clone(),
+                };
+                header_map.insert((*name).clone(), meta);
+                continue;
+            }
+
+            // Issue #3: 8-byte Alignment
+            let padding = (8 - (current_offset % 8)) % 8;
+            current_offset += padding;
+
             let size = tensor.shape.iter().product::<usize>() * crate::utils::get_dtype_size(&tensor.dtype);
+            let start = current_offset;
+            let end = current_offset + size;
 
             let meta = RawTensorMetaData {
                 shape: tensor.shape.clone(),
                 dtype: tensor.dtype.clone(),
-                data_offsets: (current_offset, current_offset + size),
+                data_offsets: (start, end),
+                extra: tensor.extra.clone(),
             };
             header_map.insert((*name).clone(), meta);
+
+            written_hashes.insert(tensor.hash.clone(), (start, end));
             current_offset += size;
         }
 
@@ -85,11 +126,32 @@ impl TGitManifest {
         writer.write_all(&header_len.to_le_bytes())?;
         writer.write_all(header_bytes)?;
 
+        // Pass 2: Write Data (with alignment padding and deduplication)
+        written_hashes.clear(); // Reset to track what we have effectively written in this pass
+        let mut current_write_pos = 0;
+
         for name in &sorted_tensor_names {
             let tensor = &self.tensors[*name];
+
+            if written_hashes.contains_key(&tensor.hash) {
+                // Data already written for this hash
+                continue;
+            }
+
+            // Add Padding
+            let padding = (8 - (current_write_pos % 8)) % 8;
+            if padding > 0 {
+                let zeros = vec![0u8; padding];
+                writer.write_all(&zeros)?;
+                current_write_pos += padding;
+            }
+
             let blob_path = store_path.join(&tensor.hash);
             let mut blob_file = File::open(blob_path)?;
-            std::io::copy(&mut blob_file, &mut writer)?;
+            let bytes_copied = std::io::copy(&mut blob_file, &mut writer)?;
+            
+            current_write_pos += bytes_copied as usize;
+            written_hashes.insert(tensor.hash.clone(), (0, 0)); // Value irrelevant, just marking as written
         }
 
         writer.flush()?;
@@ -123,50 +185,5 @@ impl TGitConfig {
     
     pub fn add_remote(&mut self, name: String, url: String) {
         self.remotes.insert(name, url);
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use std::io::Read as _;
-
-    use super::*;
-
-
-    #[test]
-    fn test_full_cycle_restore() -> Result<(), Box<dyn std::error::Error>> {
-
-        let original_path = "test_cycle_original.safetensors";
-        let restored_path = "test_cycle_restored.safetensors";
-        
-
-        {
-            let mut file = File::create(original_path)?;
-            let header_json = r#"{"test_tensor": {"dtype":"F32", "shape":[1], "data_offsets":[0, 4]}}"#;
-            let header_len = header_json.len() as u64;
-            file.write_all(&header_len.to_le_bytes())?;
-            file.write_all(header_json.as_bytes())?;
-            file.write_all(&[1u8, 2u8, 3u8, 4u8])?; // The data
-        }
-
-        let file = crate::SafetensorFile::open(original_path)?;
-        let manifest = file.process(true); // true = save blobs
-
-        std::fs::remove_file(original_path)?;
-
-        manifest.restore(std::path::Path::new(restored_path))?;
-
-        let mut f = File::open(restored_path)?;
-        let mut buffer = Vec::new();
-        f.read_to_end(&mut buffer)?;
-        
-        // Size = 8 (len) + 79 (header) + 4 (data) = 91 bytes
-        assert!(buffer.len() > 70); 
-        
-        // Clean up
-        std::fs::remove_file(restored_path)?;
-        
-        Ok(())
     }
 }

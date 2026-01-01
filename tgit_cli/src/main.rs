@@ -2,6 +2,7 @@ use std::{fs::File};
 use std::path::PathBuf;
 use std::io::Write;
 use tgit_core::SafetensorFile;
+use tgit_core::ModelArchiver;
 use tgit_core::utils::get_store_path;
 
 use clap::{Parser, Subcommand};
@@ -63,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("Adding file: {} ... ", path_str);
 
             let file = SafetensorFile::open(path_str)?;
-            let manifest = file.process(true);
+            let manifest = file.process(true)?;
             let manifest_json = serde_json::to_string_pretty(&manifest)?;
 
             let output_path = path.with_extension("tgit.json");
