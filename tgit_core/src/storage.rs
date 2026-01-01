@@ -93,7 +93,6 @@ impl TGitManifest {
         let mut header_map: RawHeader = IndexMap::new();
         let mut current_offset = 0;
 
-        // Issue #2: Track written hashes to handle shared weights
         // Hash -> (start_offset, end_offset)
         let mut written_hashes: HashMap<String, (usize, usize)> = HashMap::new();
 
@@ -113,7 +112,6 @@ impl TGitManifest {
                 continue;
             }
 
-            // Issue #3: 8-byte Alignment
             let padding = (8 - (current_offset % 8)) % 8;
             current_offset += padding;
 

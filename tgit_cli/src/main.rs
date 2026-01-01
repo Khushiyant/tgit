@@ -22,14 +22,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Init,
     Add {
         path: PathBuf,
+        #[arg(long, default_value = "false")]
+        compress: bool,
     },
     Restore {
         path: PathBuf,
         #[arg(long)]
         layers: Option<String>,
-    }, 
+    },
+    Diff {
+        old: PathBuf,
+        new: PathBuf,
+    },
     Remote {
         #[command(subcommand)]
         action: RemoteCommand,
@@ -42,8 +49,7 @@ enum Commands {
         #[arg(default_value = "origin")]
         remote: String,
     },
-    Status {
-    },
+    Status,
     Gc,
 }
 
@@ -91,9 +97,41 @@ fn scan_manifests(dir: &std::path::Path, hashes: &mut HashSet<String>) -> std::i
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Check if repository is initialized for all commands except Init
+    if !matches!(cli.command, Commands::Init) {
+        if find_tgit_root().is_none() {
+            eprintln!("Error: Not a tgit repository (or any parent up to mount point)");
+            eprintln!("Run 'tgit init' first to initialize a repository.");
+            std::process::exit(1);
+        }
+    }
+
     match &cli.command {
-        Commands::Add { path } => {
-            // Issue #5: Lock File
+        Commands::Init => {
+            let current_dir = std::env::current_dir()?;
+            let tgit_dir = current_dir.join(".tgit");
+            
+            if tgit_dir.exists() {
+                println!("TGit repository already exists in {}", current_dir.display());
+                return Ok(());
+            }
+
+            std::fs::create_dir_all(&tgit_dir)?;
+            std::fs::create_dir_all(tgit_dir.join("blobs"))?;
+            
+            // Create default config
+            let config = tgit_core::storage::TGitConfig::default();
+            config.save()?;
+            
+            // Create .gitignore to ignore everything in .tgit
+            let gitignore_content = "*\n";
+            std::fs::write(tgit_dir.join(".gitignore"), gitignore_content)?;
+                        println!("Initialized empty TGit repository in {}", tgit_dir.display());
+            println!("\nTGit tracks machine learning models at the tensor level.");
+            println!("Use 'tgit add <model.safetensors>' to start tracking a model.");
+        }
+
+        Commands::Add { path, compress } => {
             let _lock = LockFile::lock()?;
 
             let path_str = path.to_str().unwrap();
@@ -113,7 +151,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let store_loc = get_store_path();
             println!("Blobs stored in {}", store_loc.to_str().unwrap());
+            
+            if *compress {
+                println!("Note: Compression is enabled but not yet fully integrated. Coming soon!");
+            }
 
+        }
+
+        Commands::Diff { old, new } => {
+            let old_file = File::open(old)?;
+            let new_file = File::open(new)?;
+            
+            let old_manifest: tgit_core::storage::TGitManifest = 
+                serde_json::from_reader(std::io::BufReader::new(old_file))?;
+            let new_manifest: tgit_core::storage::TGitManifest = 
+                serde_json::from_reader(std::io::BufReader::new(new_file))?;
+            
+            old_manifest.print_diff(&new_manifest);
         }
 
         Commands::Restore { path, layers } => {

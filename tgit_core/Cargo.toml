@@ -24,4 +24,11 @@ rust-s3 = "0.37.1"
 # Preserving insertion order for maps
 indexmap = { version = "2.1", features = ["serde"] }
 futures = "0.3.31"
+# Compression
+zstd = "0.13"
+# For testing
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
 

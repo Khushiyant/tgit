@@ -1,6 +1,10 @@
 pub mod storage;
 pub mod utils;
 pub mod remote;
+pub mod errors;
+pub mod validation;
+pub mod compression;
+pub mod diff;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
