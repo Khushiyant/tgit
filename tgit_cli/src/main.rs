@@ -44,7 +44,6 @@ enum Commands {
     },
     Status {
     },
-    // Issue #3: Garbage Collection
     Gc,
 }
 

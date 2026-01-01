@@ -2,9 +2,29 @@ use std::path::PathBuf;
 use std::fs::{self};
 use std::io;
 
+/// Locates the root .tgit directory by traversing up from the current directory.
+/// Returns the path containing .tgit (e.g., /path/to/repo).
+pub fn find_tgit_root() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+    loop {
+        let tgit_path = current.join(".tgit");
+        if tgit_path.exists() && tgit_path.is_dir() {
+            return Some(current);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Returns the path to the blobs directory.
+/// Uses the local repository's .tgit/blobs if found, otherwise defaults to ./.tgit/blobs
 pub fn get_store_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&home).join(".tgit").join("blobs")
+    match find_tgit_root() {
+        Some(root) => root.join(".tgit").join("blobs"),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".tgit").join("blobs"),
+    }
 }
 
 pub fn get_dtype_size(dtype: &str) -> usize {
@@ -28,7 +48,9 @@ pub struct LockFile {
 
 impl LockFile {
     pub fn lock() -> Result<Self, io::Error> {
-        let path = std::env::current_dir()?.join(".tgit").join("lock");
+        // Use the found root or current dir for locking
+        let root = find_tgit_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let path = root.join(".tgit").join("lock");
         
         // Ensure .tgit exists
         if let Some(parent) = path.parent() {
