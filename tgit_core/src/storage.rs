@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use crate::utils::get_store_path;
 use indexmap::IndexMap;
+use crate::utils::find_tgit_root;
 
 // Metadata for a single tensor in raw format in safetensor file
 #[derive(Serialize, Deserialize, Debug)]
@@ -175,7 +176,8 @@ impl TGitManifest {
 
 impl TGitConfig {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let path = std::env::current_dir()?.join(".tgit").join("config.json");
+        let root = find_tgit_root().unwrap_or_else(|| std::env::current_dir().unwrap());
+        let path = root.join(".tgit").join("config.json");
         if !path.exists() {
             return Ok(TGitConfig::default());
         }
