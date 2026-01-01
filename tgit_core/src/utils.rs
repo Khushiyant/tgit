@@ -1,33 +1,53 @@
-use std::fs;
 use std::path::PathBuf;
-use std::fs::File;
-use std::io::Write;
-
-use std::env;
+use std::fs::{self};
+use std::io;
 
 pub fn get_store_path() -> PathBuf {
-    let current_dir = env::current_dir().expect("Failed to get current directory");
-    let store_dir = current_dir.join(".tgit").join("blobs");
-    
-    if !store_dir.exists() {
-        fs::create_dir_all(&store_dir).expect("Failed to create .tgit/blobs");
-        
-        let gitignore = current_dir.join(".tgit").join(".gitignore");
-        if !gitignore.exists() {
-             let mut f = File::create(gitignore).unwrap();
-             writeln!(f, "*").unwrap(); 
-        }
-    }
-    
-    store_dir
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&home).join(".tgit").join("blobs")
 }
 
 pub fn get_dtype_size(dtype: &str) -> usize {
     match dtype {
-        "F32" | "I32" => 4,
-        "F16" | "I16" | "BF16" => 2,
-        "F64" | "I64" => 8,
-        "I8" | "U8" | "BOOL" => 1,
-        _ => panic!("Unsupported dtype: {}", dtype), // For now, panic is fine
+        "F32" => 4,
+        "F16" => 2,
+        "BF16" => 2,
+        "I64" => 8,
+        "I32" => 4,
+        "I16" => 2,
+        "I8" => 1,
+        "U8" => 1,
+        "BOOL" => 1,
+        _ => 1, // Fallback
+    }
+}
+
+pub struct LockFile {
+    path: PathBuf,
+}
+
+impl LockFile {
+    pub fn lock() -> Result<Self, io::Error> {
+        let path = std::env::current_dir()?.join(".tgit").join("lock");
+        
+        // Ensure .tgit exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Try to create the file atomically. fails if exists.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "TGit is currently locked by another process."))?;
+
+        Ok(LockFile { path })
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }

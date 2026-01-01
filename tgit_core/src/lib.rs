@@ -1,7 +1,8 @@
 pub mod storage;
 pub mod utils;
+pub mod remote;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use rayon::prelude::*;
 use blake3;
@@ -11,18 +12,18 @@ use std::io::Write;
 
 use storage::{RawHeader, TGitManifest, ManifestTensor};
 
-// Issue #5: Trait-based architecture for multiple formats (GGUF, PyTorch, etc.)
 pub trait ModelArchiver {
     fn process(&self, save_blobs: bool) -> Result<TGitManifest, Box<dyn std::error::Error>>;
-    fn restore(manifest: &TGitManifest, output_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>;
+    fn restore(manifest: &TGitManifest, output_path: &std::path::Path, filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 pub struct SafetensorFile {
     pub header: RawHeader,
     pub mmap: Mmap,
-    
     pub header_len: usize,
 }
+
+
 
 impl SafetensorFile {
     pub fn new(mmap: Mmap, header: RawHeader, header_len: usize) -> Self {
@@ -54,21 +55,18 @@ impl ModelArchiver for SafetensorFile {
     fn process(&self, save_blobs: bool) -> Result<TGitManifest, Box<dyn std::error::Error>> {
 
         let store_path = utils::get_store_path();
-        
         let header_entries: Vec<(usize, &String, &storage::RawTensorMetaData)> = self.header.iter()
             .enumerate()
             .map(|(i, (k, v))| (i, k, v))
             .collect();
 
-        let results: HashMap<String, ManifestTensor> = header_entries
+        let results: BTreeMap<String, ManifestTensor> = header_entries
             .par_iter()
             .filter_map(
                 |(index, tensor_name, tensor_meta)| {
                     let (start, end) = tensor_meta.data_offsets;
                     let absolute_start = self.header_len + 8 + start;
                     let absolute_end = self.header_len + 8 + end;
-
-                
                     if absolute_end > self.mmap.len() {
                         eprintln!(
                             "Corrupt Tensor '{}': Ends at byte {}, but file is only {} bytes. Skipping.",
@@ -79,7 +77,6 @@ impl ModelArchiver for SafetensorFile {
                     let data_slice = &self.mmap[absolute_start..absolute_end];
                     let hash = blake3::hash(data_slice);
                     let hash_hex = hex::encode(hash.as_bytes());
-
 
                     if save_blobs {
                         let blob_path = store_path.join(&hash_hex);
@@ -107,17 +104,15 @@ impl ModelArchiver for SafetensorFile {
                 },
             )
             .collect();
-
         Ok(TGitManifest {
             tensors: results,
             version: "1.0".to_string(),
             total_size: self.mmap.len(),
         })
     }
-
-    fn restore(manifest: &TGitManifest, output_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn restore(manifest: &TGitManifest, output_path: &std::path::Path, filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         // Delegate to the existing restore logic in TGitManifest
         // In a real multi-format system, this logic would likely live here or in a Safetensors-specific module
-        manifest.restore(output_path)
+        manifest.restore(output_path, filter)
     }
 }

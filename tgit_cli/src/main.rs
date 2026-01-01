@@ -1,9 +1,11 @@
 use std::{fs::File};
 use std::path::PathBuf;
 use std::io::Write;
+use std::collections::HashSet;
 use tgit_core::SafetensorFile;
 use tgit_core::ModelArchiver;
-use tgit_core::utils::get_store_path;
+use tgit_core::utils::{get_store_path, LockFile};
+use tgit_core::remote::RemoteClient;
 
 use clap::{Parser, Subcommand};
 
@@ -25,6 +27,8 @@ enum Commands {
     },
     Restore {
         path: PathBuf,
+        #[arg(long)]
+        layers: Option<String>,
     }, 
     Remote {
         #[command(subcommand)]
@@ -40,6 +44,8 @@ enum Commands {
     },
     Status {
     },
+    // Issue #3: Garbage Collection
+    Gc,
 }
 
 #[derive(Subcommand)]
@@ -54,11 +60,15 @@ enum RemoteCommand {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match &cli.command {
         Commands::Add { path } => {
+            // Issue #5: Lock File
+            let _lock = LockFile::lock()?;
+
             let path_str = path.to_str().unwrap();
 
             print!("Adding file: {} ... ", path_str);
@@ -79,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         }
 
-        Commands::Restore { path } => {
+        Commands::Restore { path, layers } => {
             let file = File::open(&path).expect("Failed to open manifest file");
             let reader = std::io::BufReader::new(file);
             let manifest: tgit_core::storage::TGitManifest = serde_json::from_reader(reader)
@@ -97,27 +107,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             println!("Restoring to {:?}...", output_path);
+            if let Some(l) = layers {
+                println!("Partial restore: filtering layers containing '{}'", l);
+            }
 
-            match manifest.restore(&output_path) {
+            match manifest.restore(&output_path, layers.as_deref()) {
                 Ok(_) => println!("Restoration complete!"),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
 
         Commands::Pull { remote } => {
-            let mut config = tgit_core::storage::TGitConfig::load()?;
+            let config = tgit_core::storage::TGitConfig::load()?;
             if let Some(url) = config.remotes.get(remote) {
                 println!("Pulling from remote '{}' at URL '{}'", remote, url);
-                // TODO: Implement pull logic
+                
+                let client = RemoteClient::new(url)?;
+                let paths = std::fs::read_dir(".")?;
+
+                for entry in paths {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.ends_with(".tgit.json") {
+                            println!("Processing manifest: {}", name);
+                            match client.pull(name).await {
+                                Ok(manifest) => {
+                                    // Update local manifest file
+                                    let json = serde_json::to_string_pretty(&manifest)?;
+                                    let mut f = File::create(&path)?;
+                                    f.write_all(json.as_bytes())?;
+                                    println!("Successfully updated {}", name);
+                                }
+                                Err(e) => eprintln!("Failed to pull {}: {}", name, e),
+                            }
+                        }
+                    }
+                }
+
             } else {
                 println!("Remote '{}' not found", remote);
             }
         }
         Commands::Push { remote } => {
-            let mut config = tgit_core::storage::TGitConfig::load()?;
+            let config = tgit_core::storage::TGitConfig::load()?;
             if let Some(url) = config.remotes.get(remote) {
                 println!("Pushing to remote '{}' at URL '{}'", remote, url);
-                // TODO: Implement push logic
+                
+                let client = RemoteClient::new(url)?;
+                let paths = std::fs::read_dir(".")?;
+
+                for entry in paths {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.ends_with(".tgit.json") {
+                            println!("Pushing manifest: {}", name);
+                            
+                            // Load manifest
+                            let f = File::open(&path)?;
+                            let reader = std::io::BufReader::new(f);
+                            let manifest: tgit_core::storage::TGitManifest = serde_json::from_reader(reader)?;
+
+                            match client.push(&manifest, name).await {
+                                Ok(_) => println!("Successfully pushed {}", name),
+                                Err(e) => eprintln!("Failed to push {}: {}", name, e),
+                            }
+                        }
+                    }
+                }
+
             } else {
                 println!("Remote '{}' not found", remote);
             }
@@ -129,9 +188,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (name, url) in &config.remotes {
                 println!("  {} -> {}", name, url);
             }
-            // Additional status information can be added here
         }
 
+        Commands::Gc => {
+            println!("Running Garbage Collection on {}...", get_store_path().display());
+            let store_path = get_store_path();
+            if !store_path.exists() {
+                println!("Store path does not exist.");
+                return Ok(());
+            }
+
+            // 1. Collect all referenced hashes
+            let mut referenced_hashes = HashSet::new();
+            let paths = std::fs::read_dir(".")?;
+            for entry in paths {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.ends_with(".tgit.json") {
+                        let f = File::open(&path)?;
+                        let reader = std::io::BufReader::new(f);
+                        if let Ok(manifest) = serde_json::from_reader::<_, tgit_core::storage::TGitManifest>(reader) {
+                            for tensor in manifest.tensors.values() {
+                                referenced_hashes.insert(tensor.hash.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            println!("Found {} referenced blobs in current directory.", referenced_hashes.len());
+
+            // 2. Scan blobs and delete unreferenced
+            let mut deleted_count = 0;
+            let mut kept_count = 0;
+            let blob_paths = std::fs::read_dir(&store_path)?;
+            
+            for entry in blob_paths {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(hash) = path.file_name().and_then(|n| n.to_str()) {
+                    if !referenced_hashes.contains(hash) {
+                        // Delete
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            eprintln!("Failed to delete blob {}: {}", hash, e);
+                        } else {
+                            deleted_count += 1;
+                        }
+                    } else {
+                        kept_count += 1;
+                    }
+                }
+            }
+            
+            println!("GC Complete. Deleted: {}, Kept: {}", deleted_count, kept_count);
+            if deleted_count > 0 {
+                println!("Warning: Blobs were deleted based only on manifests in the CURRENT directory. If other projects share this store, you may have broken them.");
+            }
+        }
 
     // Remote management commands
         Commands::Remote { action } => {

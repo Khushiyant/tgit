@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use indexmap::IndexMap;
@@ -40,7 +40,7 @@ fn test_full_cycle_restore() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::remove_file(original_path)?;
 
-    manifest.restore(std::path::Path::new(restored_path))?;
+    manifest.restore(std::path::Path::new(restored_path), None)?;
 
     let mut f = File::open(restored_path)?;
     let mut buffer = Vec::new();
@@ -58,9 +58,9 @@ fn test_full_cycle_restore() -> Result<(), Box<dyn std::error::Error>> {
 fn test_shared_weights_deduplication() {
     // Unique data to avoid conflict
     let data = vec![11u8, 22u8, 33u8, 44u8]; 
-    let hash = create_blob(&data); 
+    let hash = create_blob(&data);
 
-    let mut tensors = HashMap::new();
+    let mut tensors = BTreeMap::new();
     
     tensors.insert("tensor_a".to_string(), ManifestTensor {
         shape: vec![4],
@@ -85,7 +85,7 @@ fn test_shared_weights_deduplication() {
     };
 
     let output_path = std::path::Path::new("test_shared.safetensors");
-    manifest.restore(output_path).unwrap();
+    manifest.restore(output_path, None).unwrap();
 
     let mut file = File::open(output_path).unwrap();
     let mut buffer = Vec::new();
@@ -112,7 +112,7 @@ fn test_alignment_padding() {
     let hash_a = create_blob(&data_a);
     let hash_b = create_blob(&data_b);
 
-    let mut tensors = HashMap::new();
+    let mut tensors = BTreeMap::new();
     
     tensors.insert("tensor_a".to_string(), ManifestTensor {
         shape: vec![1],
@@ -137,7 +137,7 @@ fn test_alignment_padding() {
     };
 
     let output_path = std::path::Path::new("test_aligned.safetensors");
-    manifest.restore(output_path).unwrap();
+    manifest.restore(output_path, None).unwrap();
 
     let mut file = File::open(output_path).unwrap();
     let mut buffer = Vec::new();
@@ -167,7 +167,7 @@ fn test_extra_metadata_preservation() {
     extra.insert("quantization".to_string(), serde_json::json!("int8"));
     extra.insert("license".to_string(), serde_json::json!("MIT"));
 
-    let mut tensors = HashMap::new();
+    let mut tensors = BTreeMap::new();
     tensors.insert("tensor_meta".to_string(), ManifestTensor {
         shape: vec![1],
         dtype: "U8".to_string(),
@@ -183,7 +183,7 @@ fn test_extra_metadata_preservation() {
     };
 
     let output_path = std::path::Path::new("test_meta.safetensors");
-    manifest.restore(output_path).unwrap();
+    manifest.restore(output_path, None).unwrap();
 
     let mut file = File::open(output_path).unwrap();
     let mut buffer = Vec::new();
@@ -197,3 +197,4 @@ fn test_extra_metadata_preservation() {
     std::fs::remove_file(output_path).unwrap();
     std::fs::remove_file(get_store_path().join(&hash)).ok();
 }
+

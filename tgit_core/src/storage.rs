@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use crate::utils::get_store_path;
@@ -33,7 +34,8 @@ pub struct ManifestTensor {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TGitManifest {
-    pub tensors: HashMap<String, ManifestTensor>,
+    // Fix Issue #1: Deterministic serialization for Git diffs
+    pub tensors: BTreeMap<String, ManifestTensor>,
     pub version: String,
 
     // Total size of all tensors in bytes
@@ -42,7 +44,7 @@ pub struct TGitManifest {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TGitConfig {
-    pub remotes: HashMap<String, String>, 
+    pub remotes: HashMap<String, String>,
 }
 
 
@@ -66,13 +68,24 @@ impl TGitManifest {
         }
     }
 
-    pub fn restore(&self, output_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn restore(&self, output_path: &std::path::Path, filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let store_path = get_store_path();
 
         let file = File::create(output_path)?;
         let mut writer = std::io::BufWriter::new(file);
 
-        let mut sorted_tensor_names: Vec<&String> = self.tensors.keys().collect();
+        // Filter tensors
+        let mut sorted_tensor_names: Vec<&String> = self.tensors.keys()
+            .filter(|name| {
+                if let Some(f) = filter {
+                    // Simple logic: keep if name contains any of the comma-separated terms
+                    f.split(',').any(|term| name.contains(term.trim()))
+                } else {
+                    true
+                }
+            })
+            .collect();
+        
         // Fix Issue #4: Sort by original index to ensure deterministic restoration
         sorted_tensor_names.sort_by_key(|name| self.tensors[*name].index);
 
@@ -159,7 +172,6 @@ impl TGitManifest {
         Ok(())
     }
 }
-
 
 impl TGitConfig {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
