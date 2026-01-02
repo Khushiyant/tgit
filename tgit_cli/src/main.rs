@@ -93,6 +93,112 @@ fn scan_manifests(dir: &std::path::Path, hashes: &mut HashSet<String>) -> std::i
     Ok(())
 }
 
+fn scan_git_history(repo_root: &std::path::Path, hashes: &mut HashSet<String>) -> std::io::Result<()> {
+    // Check if this is a git repository
+    let git_dir = repo_root.join(".git");
+    if !git_dir.exists() {
+        return Ok(());
+    }
+
+    // Use git rev-list to get ALL objects in the entire history (not just branch tips)
+    let rev_list_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-list")
+        .arg("--all")
+        .arg("--objects")
+        .output();
+
+    if let Ok(output) = rev_list_output {
+        if !output.status.success() {
+            return Ok(());
+        }
+
+        let objects = String::from_utf8_lossy(&output.stdout);
+        
+        // Collect all object SHAs that are .tgit.json files
+        let mut manifest_objects = Vec::new();
+        for line in objects.lines() {
+            // Format: "<sha> <path>" or just "<sha>" for commits
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                let (sha, path) = (parts[0], parts[1]);
+                if path.ends_with(".tgit.json") {
+                    manifest_objects.push(sha.to_string());
+                }
+            }
+        }
+
+        if manifest_objects.is_empty() {
+            return Ok(());
+        }
+
+        // Use git cat-file --batch for efficient streaming of multiple objects
+        let mut cat_file = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .arg("cat-file")
+            .arg("--batch")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+
+        // Write all SHAs to stdin
+        if let Some(mut stdin) = cat_file.stdin.take() {
+            use std::io::Write;
+            for sha in &manifest_objects {
+                writeln!(stdin, "{}", sha)?;
+            }
+            // Close stdin to signal we're done
+            drop(stdin);
+        }
+
+        // Read the batched output
+        if let Some(stdout) = cat_file.stdout.take() {
+            use std::io::{BufRead, Read};
+            let mut reader = std::io::BufReader::new(stdout);
+            
+            loop {
+                // Read header line: "<sha> <type> <size>"
+                let mut header_line = String::new();
+                let bytes_read = reader.read_line(&mut header_line)?;
+                if bytes_read == 0 {
+                    break; // EOF
+                }
+                
+                let parts: Vec<&str> = header_line.trim().split_whitespace().collect();
+                if parts.len() != 3 {
+                    continue;
+                }
+                
+                let size: usize = match parts[2].parse() {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                // Read exactly 'size' bytes (the actual file content)
+                let mut content = vec![0u8; size];
+                reader.read_exact(&mut content)?;
+                
+                // Read the trailing newline that git cat-file adds after each object
+                let mut newline = [0u8; 1];
+                reader.read_exact(&mut newline)?;
+
+                // Try to parse as manifest
+                if let Ok(manifest) = serde_json::from_slice::<tgit_core::storage::TGitManifest>(&content) {
+                    for tensor in manifest.tensors.values() {
+                        hashes.insert(tensor.hash.clone());
+                    }
+                }
+            }
+        }
+
+        cat_file.wait()?;
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -286,9 +392,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scan_root = find_tgit_root().unwrap_or_else(|| PathBuf::from("."));
             println!("Scanning for manifests starting from: {}", scan_root.display());
             
+            // Scan current working tree
             scan_manifests(&scan_root, &mut referenced_hashes)?;
             
-            println!("Found {} referenced blobs in the repository.", referenced_hashes.len());
+            // Scan git history (all branches and commits)
+            println!("Scanning Git history for manifests...");
+            scan_git_history(&scan_root, &mut referenced_hashes)?;
+            
+            println!("Found {} referenced blobs (including all Git branches).", referenced_hashes.len());
 
             // 2. Scan blobs and delete unreferenced
             let mut deleted_count = 0;
