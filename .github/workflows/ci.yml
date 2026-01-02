@@ -5,16 +5,15 @@ permissions:
 
 on:
   push:
-    branches: [ "main" ]
-    tags: [ "v*" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 1. Quality Check: Runs formatting and linting
+  # 1. Quality Check
   quality:
     name: Code Quality
     runs-on: ubuntu-latest
@@ -33,7 +32,7 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 
-  # 2. Test: Runs cargo test on Linux, Windows, and macOS
+  # 2. Test
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -44,22 +43,47 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      
-      # OpenSSL needed for Linux (reqwest/rust-s3 dependency)
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
-
       - name: Run Tests
         run: cargo test --workspace --verbose
 
-  # 3. Release: Builds binaries and creates a GitHub Release
-  release:
-    name: Release Binary
+  # 3. Calculate Next Version (The Automation Magic)
+  check-version:
+    name: Calculate Version
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [quality, test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      tag: ${{ steps.semver.outputs.version_tag }}
+      changed: ${{ steps.semver.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required to analyze git history
+
+      - name: Calculate Semantic Version
+        id: semver
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "(MAJOR)"
+          minor_pattern: "feat"
+          # Default to patch if it's a 'fix' or any other commit that isn't excluded
+          version_format: "${major}.${minor}.${patch}"
+          # Look for tags in history to determine previous version
+          search_commit_body: true
+
+  # 4. Build Binaries (Only if version changed)
+  build:
+    name: Build Binaries
+    needs: [check-version]
+    # Only run if a new version was detected
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -76,10 +100,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             binary_name: vekt.exe
             asset_name: vekt-windows-amd64.exe
-
     steps:
       - uses: actions/checkout@v4
-      
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -94,13 +116,41 @@ jobs:
       - name: Build Release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload Release Asset
+      # Prepare the binary with the correct name (e.g. vekt-linux-amd64)
+      - name: Rename and Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "dist/${{ matrix.asset_name }}"
+
+      # Upload the binary to GitHub Actions (temporary storage)
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}
+          path: dist/*
+          retention-days: 1
+
+  # 5. Create Release & Tag
+  release:
+    name: Publish Release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: release-dist
+
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-          # Renames the binary to be OS-specific (e.g., vekt-linux-amd64)
-          name: ${{ github.ref_name }}
+          # Use the tag calculated in step 3
+          tag_name: ${{ needs.check-version.outputs.tag }}
+          name: Release ${{ needs.check-version.outputs.tag }}
+          files: release-dist/*
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
