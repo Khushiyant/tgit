@@ -1,6 +1,7 @@
 use crate::blobs;
-use crate::utils::{ensure_vekt_dir, find_vekt_root};
 use crate::errors::{Result, VektError};
+use crate::utils::{ensure_vekt_dir, find_vekt_root, write_file_atomic};
+use crate::validation::{validate_tensor_name, verify_blob_hash};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,6 +50,23 @@ pub struct VektConfig {
 }
 
 impl VektManifest {
+    /// Current manifest version
+    pub const CURRENT_VERSION: &'static str = "1.0";
+
+    /// Validates and migrates manifest to current version if needed
+    pub fn validate_and_migrate(self) -> Result<Self> {
+        match self.version.as_str() {
+            "1.0" => Ok(self),
+            // Future versions would be handled here
+            // "2.0" => self.migrate_from_v2_to_current(),
+            unknown => Err(VektError::InvalidManifest(format!(
+                "Unsupported manifest version '{}'. Current version is '{}'. Please update vekt.",
+                unknown,
+                Self::CURRENT_VERSION
+            ))),
+        }
+    }
+
     pub fn print_summary(&self) {
         println!("vekt Manifest Summary:");
         println!("Version: {}", self.version);
@@ -67,11 +85,12 @@ impl VektManifest {
         }
     }
 
-    pub fn restore(
-        &self,
-        output_path: &std::path::Path,
-        filter: Option<&str>,
-    ) -> Result<()> {
+    pub fn restore(&self, output_path: &std::path::Path, filter: Option<&str>) -> Result<()> {
+        // Validate all tensor names before processing to prevent path traversal
+        for name in self.tensors.keys() {
+            validate_tensor_name(name)?;
+        }
+
         let file = File::create(output_path)?;
         let mut writer = std::io::BufWriter::new(file);
 
@@ -163,10 +182,26 @@ impl VektManifest {
 
             // Use centralized blob path resolution
             let blob_path = blobs::get_blob_path(&tensor.hash);
-            let mut blob_file = File::open(blob_path)?;
-            let bytes_copied = std::io::copy(&mut blob_file, &mut writer)?;
+            if !blob_path.exists() {
+                return Err(VektError::BlobNotFound(format!(
+                    "Blob {} not found for tensor '{}'",
+                    tensor.hash, name
+                )));
+            }
 
-            current_write_pos += bytes_copied as usize;
+            // CRITICAL: Verify blob hash to detect corruption
+            let blob_data = std::fs::read(&blob_path).map_err(|e| {
+                VektError::Io(std::io::Error::other(format!(
+                    "Failed to read blob {}: {}",
+                    tensor.hash, e
+                )))
+            })?;
+
+            verify_blob_hash(&blob_data, &tensor.hash)?;
+
+            // Write verified blob data
+            writer.write_all(&blob_data)?;
+            current_write_pos += blob_data.len();
             written_hashes.insert(tensor.hash.clone(), (0, 0)); // Value irrelevant, just marking as written
         }
 
@@ -183,17 +218,35 @@ impl VektConfig {
         if !path.exists() {
             return Ok(VektConfig::default());
         }
-        let file = File::open(path)?;
+        let file = File::open(&path).map_err(|e| {
+            VektError::Io(std::io::Error::other(format!(
+                "Failed to open config file at {}: {}",
+                path.display(),
+                e
+            )))
+        })?;
         let reader = std::io::BufReader::new(file);
-        let config = serde_json::from_reader(reader)?;
+        let config = serde_json::from_reader(reader).map_err(|e| {
+            VektError::InvalidManifest(format!(
+                "Failed to parse config file at {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
         Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
         let dir = std::env::current_dir()?.join(".vekt");
         ensure_vekt_dir(&dir)?;
-        let file = File::create(dir.join("config.json"))?;
-        serde_json::to_writer_pretty(file, self)?;
+        let config_path = dir.join("config.json");
+        let json = serde_json::to_string_pretty(self)?;
+        write_file_atomic(&config_path, json.as_bytes()).map_err(|e| {
+            VektError::Io(std::io::Error::other(format!(
+                "Failed to write config file: {}",
+                e
+            )))
+        })?;
         Ok(())
     }
 

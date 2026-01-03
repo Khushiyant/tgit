@@ -52,6 +52,24 @@ pub enum VektError {
 
     #[error("Invalid tensor name: {0}")]
     InvalidTensorName(String),
+
+    #[error("Stale lock file detected. Process may have crashed. Lock age: {0} seconds")]
+    StaleLock(u64),
+
+    #[error("Credential validation failed: {0}")]
+    CredentialError(String),
+
+    #[error("Conflict detected: {0}")]
+    ConflictDetected(String),
+
+    #[error("Manifest corrupted: {0}")]
+    ManifestCorrupted(String),
+
+    #[error("Git operation failed: {0}")]
+    GitError(String),
+
+    #[error("Operation cancelled: {0}")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, VektError>;

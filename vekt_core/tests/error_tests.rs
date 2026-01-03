@@ -31,7 +31,7 @@ fn test_open_invalid_header_len() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut file = File::create(path)?;
         // Write huge header length
-        let len: u64 = 1_000_000_000; 
+        let len: u64 = 1_000_000_000;
         file.write_all(&len.to_le_bytes())?;
         // Write a bit of data, but not enough for header
         file.write_all(b"{}")?;

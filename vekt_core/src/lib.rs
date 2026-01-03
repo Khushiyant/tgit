@@ -42,27 +42,34 @@ impl SafetensorFile {
         // Open the file and create a memory-mapped buffer
         use std::fs::File;
         let file = File::open(path)?;
-        
+
         if file.metadata()?.len() < 8 {
-             return Err(VektError::InvalidSafetensor("File too small".to_string()));
+            return Err(VektError::InvalidSafetensor("File too small".to_string()));
         }
-        
-        // Unsafe: Mmap assumes file doesn't change underneath. 
+
+        // Unsafe: Mmap assumes file doesn't change underneath.
         // Standard in this domain (huggingface/safetensors does this).
         let mmap = unsafe { Mmap::map(&file)? };
 
         // Read the header length (first 8 bytes)
         let header_len_bytes = &mmap[0..8];
-        let header_len = usize::from_le_bytes(header_len_bytes.try_into().map_err(|_| VektError::InvalidSafetensor("Invalid header length".to_string()))?);
+        let header_len = usize::from_le_bytes(
+            header_len_bytes
+                .try_into()
+                .map_err(|_| VektError::InvalidSafetensor("Invalid header length".to_string()))?,
+        );
 
         // Read the header JSON
         if 8 + header_len > mmap.len() {
-             return Err(VektError::InvalidSafetensor("Header length exceeds file size".to_string()));
+            return Err(VektError::InvalidSafetensor(
+                "Header length exceeds file size".to_string(),
+            ));
         }
-        
+
         let header_json_bytes = &mmap[8..8 + header_len];
-        let header_json_str = std::str::from_utf8(header_json_bytes)
-            .map_err(|e| VektError::InvalidSafetensor(format!("Header is not valid UTF-8: {}", e)))?;
+        let header_json_str = std::str::from_utf8(header_json_bytes).map_err(|e| {
+            VektError::InvalidSafetensor(format!("Header is not valid UTF-8: {}", e))
+        })?;
         let header: RawHeader = serde_json::from_str(header_json_str)
             .map_err(|e| VektError::InvalidSafetensor(format!("Invalid header JSON: {}", e)))?;
 
@@ -86,14 +93,16 @@ impl ModelArchiver for SafetensorFile {
                 let (start, end) = tensor_meta.data_offsets;
                 let absolute_start = self.header_len + 8 + start;
                 let absolute_end = self.header_len + 8 + end;
-                
+
                 if absolute_end > self.mmap.len() {
-                     return Err(VektError::TensorCorruption(format!(
+                    return Err(VektError::TensorCorruption(format!(
                         "Tensor '{}': Ends at byte {}, but file is only {} bytes.",
-                        tensor_name, absolute_end, self.mmap.len()
+                        tensor_name,
+                        absolute_end,
+                        self.mmap.len()
                     )));
                 }
-                
+
                 let data_slice = &self.mmap[absolute_start..absolute_end];
                 let hash_hex = blobs::compute_blob_hash(data_slice);
 
@@ -107,7 +116,7 @@ impl ModelArchiver for SafetensorFile {
                         index: *index,
                     },
                     absolute_start,
-                    absolute_end
+                    absolute_end,
                 ))
             })
             .collect();
@@ -115,7 +124,7 @@ impl ModelArchiver for SafetensorFile {
         // Collect results and fail fast on error
         let mut results = BTreeMap::new();
         let mut valid_entries = Vec::new();
-        
+
         for res in processed_tensors {
             let (name, tensor, start, end) = res?;
             results.insert(name, tensor);
@@ -126,15 +135,17 @@ impl ModelArchiver for SafetensorFile {
         // We use try_for_each to handle errors, and par_iter to potentially parallelize IO
         // (though disk IO is often better serialized or throttled, rayon handles this reasonably well)
         if save_blobs {
-             valid_entries.par_iter().try_for_each(|(start, end)| -> Result<()> {
-                  let data = &self.mmap[*start..*end];
-                  match blobs::save_blob_deduplicated(data) {
-                      Ok(_) => Ok(()),
-                      Err(e) => Err(VektError::Io(e))
-                  }
-             })?;
+            valid_entries
+                .par_iter()
+                .try_for_each(|(start, end)| -> Result<()> {
+                    let data = &self.mmap[*start..*end];
+                    match blobs::save_blob_deduplicated(data) {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(VektError::Io(e)),
+                    }
+                })?;
         }
-        
+
         Ok(VektManifest {
             tensors: results,
             version: "1.0".to_string(),

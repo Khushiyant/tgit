@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "vekt repository already exists in {}",
                     current_dir.display()
                 );
-                return Ok(())
+                return Ok(());
             }
 
             std::fs::create_dir_all(&vekt_dir)?;
@@ -130,9 +130,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let old_file = File::open(old)?;
             let new_file = File::open(new)?;
 
-            let old_manifest: vekt_core::storage::VektManifest = 
+            let old_manifest: vekt_core::storage::VektManifest =
                 serde_json::from_reader(std::io::BufReader::new(old_file))?;
-            let new_manifest: vekt_core::storage::VektManifest = 
+            let new_manifest: vekt_core::storage::VektManifest =
                 serde_json::from_reader(std::io::BufReader::new(new_file))?;
 
             old_manifest.print_diff(&new_manifest);
@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Restore { path, layers } => {
             let file = File::open(path).expect("Failed to open manifest file");
             let reader = std::io::BufReader::new(file);
-            let manifest: vekt_core::storage::VektManifest = 
+            let manifest: vekt_core::storage::VektManifest =
                 serde_json::from_reader(reader).expect("Failed to parse manifest JSON");
 
             let output_path = if let Some(file_name) = path.file_name() {
@@ -171,6 +171,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Pulling from remote '{}' at URL '{}'", remote, url);
 
                 let client = RemoteClient::new(url)?;
+
+                // Validate access before attempting operations
+                println!("Validating S3 bucket access...");
+                if let Err(e) = client.validate_access().await {
+                    eprintln!("Failed to validate S3 access: {}", e);
+                    return Err(e.into());
+                }
+
                 let paths = std::fs::read_dir(".")?;
 
                 for entry in paths {
@@ -203,6 +211,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Pushing to remote '{}' at URL '{}'", remote, url);
 
                 let client = RemoteClient::new(url)?;
+
+                // Validate access before attempting operations
+                println!("Validating S3 bucket access...");
+                if let Err(e) = client.validate_access().await {
+                    eprintln!("Failed to validate S3 access: {}", e);
+                    return Err(e.into());
+                }
+
                 let paths = std::fs::read_dir(".")?;
 
                 for entry in paths {
@@ -216,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Load manifest
                         let f = File::open(&path)?;
                         let reader = std::io::BufReader::new(f);
-                        let manifest: vekt_core::storage::VektManifest = 
+                        let manifest: vekt_core::storage::VektManifest =
                             serde_json::from_reader(reader)?;
 
                         match client.push(&manifest, name).await {
@@ -244,16 +260,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Running Garbage Collection on {}...",
                 get_store_path().display()
             );
-            
+
             let root = find_vekt_root().unwrap_or_else(|| PathBuf::from("."));
             match vekt_core::gc::run_gc(&root) {
                 Ok(stats) => {
                     println!(
                         "GC Complete. Deleted: {}, Kept: {}",
-                        stats.deleted,
-                        stats.kept
+                        stats.deleted, stats.kept
                     );
-                },
+                }
                 Err(e) => eprintln!("GC Failed: {}", e),
             }
         }

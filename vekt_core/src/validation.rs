@@ -22,13 +22,16 @@ fn get_s3_bucket_regex() -> &'static Regex {
 
 /// Validates that a path doesn't contain path traversal attempts
 pub fn validate_path_safe(path: &str) -> Result<()> {
-    if path.contains("..") || path.starts_with('/') {
-        return Err(VektError::PathTraversal(path.to_string()));
+    if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+        return Err(VektError::PathTraversal(format!(
+            "Path contains unsafe characters or traversal attempt: {}",
+            path
+        )));
     }
     Ok(())
 }
 
-/// Validates tensor name to prevent injection attacks
+/// Validates tensor name to prevent injection attacks and path traversal
 pub fn validate_tensor_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 256 {
         return Err(VektError::InvalidTensorName(
@@ -36,10 +39,18 @@ pub fn validate_tensor_name(name: &str) -> Result<()> {
         ));
     }
 
+    // Check for path traversal attempts
+    if name.contains("..") || name.starts_with('/') || name.starts_with('\\') {
+        return Err(VektError::PathTraversal(format!(
+            "Tensor name contains path traversal attempt: {}",
+            name
+        )));
+    }
+
     // Use regex for cleaner validation
     if !get_tensor_name_regex().is_match(name) {
         return Err(VektError::InvalidTensorName(format!(
-            "Invalid characters in tensor name: {}",
+            "Invalid characters in tensor name '{}'. Only alphanumeric, dots, underscores, hyphens, and forward slashes allowed.",
             name
         )));
     }

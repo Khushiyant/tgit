@@ -50,7 +50,17 @@ pub fn write_blob_atomic(data: &[u8]) -> std::io::Result<String> {
 /// Reads a blob from storage given its hash
 pub fn read_blob(hash: &str) -> std::io::Result<Vec<u8>> {
     let blob_path = get_blob_path(hash);
-    fs::read(blob_path)
+    std::fs::read(&blob_path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "Failed to read blob {} from {}: {}",
+                hash,
+                blob_path.display(),
+                e
+            ),
+        )
+    })
 }
 
 /// Saves a blob only if it doesn't already exist (deduplication)
@@ -82,11 +92,11 @@ mod tests {
     #[test]
     fn test_blob_deduplication() {
         let data = b"unique test data for dedup";
-        
+
         // Cleanup before test to ensure fresh state
         let hash = compute_blob_hash(data);
         let _ = fs::remove_file(get_blob_path(&hash));
-        
+
         let (hash1, written1) = save_blob_deduplicated(data).unwrap();
         let (hash2, written2) = save_blob_deduplicated(data).unwrap();
 

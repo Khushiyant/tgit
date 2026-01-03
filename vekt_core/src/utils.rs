@@ -1,6 +1,18 @@
+use crate::errors::{Result, VektError};
 use std::fs::{self};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Atomically writes data to a file using temp file + rename pattern
+pub fn write_file_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    let mut f = fs::File::create(&tmp_path)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
 
 /// Ensures .vekt directory exists with proper .gitignore file
 pub fn ensure_vekt_dir(vekt_path: &Path) -> io::Result<()> {
@@ -71,7 +83,10 @@ pub struct LockFile {
 }
 
 impl LockFile {
-    pub fn lock() -> Result<Self, io::Error> {
+    /// Maximum age of lock file before considering it stale (5 minutes)
+    const STALE_LOCK_THRESHOLD_SECS: u64 = 300;
+
+    pub fn lock() -> Result<Self> {
         // Use the found root or current dir for locking
         let root = find_vekt_root()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -79,19 +94,61 @@ impl LockFile {
         let path = vekt_dir.join("lock");
 
         // Ensure .vekt exists with .gitignore
-        ensure_vekt_dir(&vekt_dir)?;
+        ensure_vekt_dir(&vekt_dir).map_err(|e| {
+            VektError::Io(io::Error::other(format!(
+                "Failed to create .vekt directory: {}",
+                e
+            )))
+        })?;
 
-        // Try to create the file atomically. fails if exists.
+        // Check for stale lock
+        if path.exists()
+            && let Ok(metadata) = fs::metadata(&path)
+            && let Ok(modified) = metadata.modified()
+            && let Ok(duration) = SystemTime::now().duration_since(modified)
+        {
+            let age_secs = duration.as_secs();
+            if age_secs > Self::STALE_LOCK_THRESHOLD_SECS {
+                // Remove stale lock
+                eprintln!(
+                    "Warning: Removing stale lock file (age: {} seconds). Previous process may have crashed.",
+                    age_secs
+                );
+                fs::remove_file(&path).map_err(|e| {
+                    VektError::Io(io::Error::other(format!(
+                        "Failed to remove stale lock: {}",
+                        e
+                    )))
+                })?;
+            } else {
+                return Err(VektError::LockExists);
+            }
+        }
+
+        // Try to create the file atomically with PID
+        let pid = std::process::id();
+        let lock_content = format!(
+            "{}\n{}",
+            pid,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "vekt is currently locked by another process.",
-                )
-            })?;
+            .map_err(|_| VektError::LockExists)?;
+
+        // Write PID to lock file
+        fs::write(&path, lock_content).map_err(|e| {
+            VektError::Io(io::Error::other(format!(
+                "Failed to write lock file: {}",
+                e
+            )))
+        })?;
 
         Ok(LockFile { path })
     }
