@@ -82,11 +82,17 @@ mod tests {
     #[test]
     fn test_blob_deduplication() {
         let data = b"unique test data for dedup";
+        
+        // Cleanup before test to ensure fresh state
+        let hash = compute_blob_hash(data);
+        let _ = fs::remove_file(get_blob_path(&hash));
+        
         let (hash1, written1) = save_blob_deduplicated(data).unwrap();
         let (hash2, written2) = save_blob_deduplicated(data).unwrap();
 
         assert_eq!(hash1, hash2);
-        assert!(written1 || written2, "At least one write should occur");
+        assert!(written1, "First write should occur");
+        assert!(!written2, "Second write should be skipped (deduplicated)");
         assert!(blob_exists(&hash1));
 
         // Cleanup
